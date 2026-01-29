@@ -31,9 +31,7 @@ const distube = new DisTube({
     new InvidiousPlugin({
       instance: "yewtu.be", // or any other Invidious instance
     }),
-  ],
-  // Required for Google Video URLs to work:
-  ffmpeg: InvidiousPlugin.getRecommendedFFmpegConfig()
+  ]
 });
 ```
 
