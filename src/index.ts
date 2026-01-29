@@ -7,6 +7,9 @@ import {
   DisTubeError,
 } from "distube";
 import fetch from "node-fetch";
+import { promises as fs } from "fs";
+import * as path from "path";
+import { tmpdir } from "os";
 import type {
   InvidiousPluginOptions,
   InvidiousVideoResponse,
@@ -26,6 +29,7 @@ import {
 export class InvidiousPlugin extends ExtractorPlugin {
   readonly instance: string;
   private readonly timeout: number;
+  private readonly tempDir: string;
 
   constructor(options: InvidiousPluginOptions) {
     super();
@@ -38,8 +42,24 @@ export class InvidiousPlugin extends ExtractorPlugin {
     }
     this.instance = normalized;
     this.timeout = options.timeout ?? 10000;
+
+    // Create temp directory for audio downloads
+    this.tempDir = path.join(tmpdir(), "distube-invidious");
+    this.ensureTempDir();
   }
-  
+
+  /**
+   * Ensure the temp directory exists
+   */
+  private async ensureTempDir(): Promise<void> {
+    try {
+      await fs.mkdir(this.tempDir, { recursive: true });
+    } catch {
+      // Directory might already exist
+    }
+  }
+
+
   // Required ExtractorPlugin Methods
 
   /**
@@ -293,9 +313,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
       `[InvidiousPlugin] Found ${opusFormats.length} opus, ${aacFormats.length} AAC, ${otherFormats.length} other audio formats`
     );
 
-    // ============================================================================
     // Priority 1: Try opus formats (highest to lowest bitrate)
-    // ============================================================================
 
     for (const format of opusFormats) {
       const result = await tryUrl(
@@ -305,9 +323,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
       if (result) return result;
     }
 
-    // ============================================================================
     // Priority 2: Try AAC formats (highest to lowest bitrate)
-    // ============================================================================
 
     for (const format of aacFormats) {
       const result = await tryUrl(
@@ -317,9 +333,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
       if (result) return result;
     }
 
-    // ============================================================================
     // Priority 3: Try other audio formats
-    // ============================================================================
 
     for (const format of otherFormats) {
       const result = await tryUrl(
@@ -329,19 +343,43 @@ export class InvidiousPlugin extends ExtractorPlugin {
       if (result) return result;
     }
 
-    // ============================================================================
-    // No valid stream found - throw error
-    // ============================================================================
+    // No valid stream found - try downloading as last resort
 
-    console.error(`[InvidiousPlugin] ERROR: No valid audio stream found for ${song.id}`);
+    console.log(`[InvidiousPlugin] No stream URLs validated, attempting download...`);
+
+    // Try to download the highest bitrate opus
+    if (opusFormats.length > 0) {
+      const bestOpus = opusFormats[0]; // Already sorted by bitrate (highest first)
+      console.log(`[InvidiousPlugin] Downloading opus audio (bitrate: ${bestOpus.bitrate})...`);
+      try {
+        return await this.downloadAudio(bestOpus.url, song.id);
+      } catch (error) {
+        console.log(`[InvidiousPlugin] Opus download failed: ${(error as Error).message}`);
+      }
+    }
+
+    // Try to download AAC
+    if (aacFormats.length > 0) {
+      const bestAac = aacFormats[0]; // Already sorted by bitrate (highest first)
+      console.log(`[InvidiousPlugin] Downloading AAC audio (bitrate: ${bestAac.bitrate})...`);
+      try {
+        return await this.downloadAudio(bestAac.url, song.id);
+      } catch (error) {
+        console.log(`[InvidiousPlugin] AAC download failed: ${(error as Error).message}`);
+      }
+    }
+
+    // Everything failed - throw error
+
+    console.error(`[InvidiousPlugin] ERROR: All methods failed for ${song.id}`);
     console.error(`[InvidiousPlugin] Opus formats tried: ${opusFormats.length}`);
     console.error(`[InvidiousPlugin] AAC formats tried: ${aacFormats.length}`);
-    console.error(`[InvidiousPlugin] Other formats tried: ${otherFormats.length}`);
+    console.error(`[InvidiousPlugin] Download attempts made, all failed`);
     console.error(`[InvidiousPlugin] Try: different Invidious instance or check if video is available`);
 
     throw new DisTubeError(
       "CANNOT_GET_STREAM_URL",
-      "No playable audio stream found. Try a different Invidious instance or check if the video is available."
+      "All playback methods failed (URL validation + download). Try a different Invidious instance or check if the video is available."
     );
   }
 
@@ -473,6 +511,49 @@ export class InvidiousPlugin extends ExtractorPlugin {
       (a, b) => b.width * b.height - a.width * a.height,
     );
     return sorted[0].url;
+  }
+
+  /**
+   * Downloads audio from a URL to a temporary file.
+   * Returns the local file path.
+   */
+  private async downloadAudio(url: string, videoId: string): Promise<string> {
+    await this.ensureTempDir();
+
+    const filename = `${videoId}.webm`;
+    const filePath = path.join(this.tempDir, filename);
+
+    console.log(`[InvidiousPlugin] Downloading audio to temp file: ${filePath}`);
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+
+      const response = await fetch(url, {
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new DisTubeError(
+          "CANNOT_GET_STREAM_URL",
+          `Download failed: HTTP ${response.status}`
+        );
+      }
+
+      const buffer = await response.arrayBuffer();
+
+      await fs.writeFile(filePath, new Uint8Array(buffer));
+
+      console.log(`[InvidiousPlugin] ✓ Download complete: ${filePath}`);
+      return filePath;
+    } catch (error) {
+      throw new DisTubeError(
+        "CANNOT_GET_STREAM_URL",
+        `Failed to download audio: ${(error as Error).message}`
+      );
+    }
   }
 
   /**
