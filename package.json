@@ -1,0 +1,52 @@
+{
+  "name": "distube-invidious",
+  "version": "1.0.0",
+  "author": "techtimefor",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/techtimefor/distube-invidious.git"
+  },
+  "description": "Invidious extractor plugin for DisTube",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": "./dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "directories": {
+    "lib": "src"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "distube",
+    "invidious",
+    "youtube",
+    "music",
+    "bot",
+    "plugin",
+    "discord",
+    "distube-invidious",
+    "distube-invidious-plugin",
+    "invidious-plugin"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "distube": "^4.0.0 || ^5.0.0"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
