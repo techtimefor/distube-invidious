@@ -44,35 +44,31 @@ export class InvidiousPlugin extends ExtractorPlugin {
    * Initialize the plugin with DisTube.
    * Configures FFmpeg globally with browser-like headers for Google Video compatibility.
    */
-  override init(distube: DisTube): void {
-    super.init(distube);
-
-    // Automatically configure FFmpeg with proper headers for Google Video URLs
-    const originalFFmpegArgs = distube.options.ffmpeg?.args || {};
-
-    distube.options.ffmpeg = distube.options.ffmpeg || {};
-    distube.options.ffmpeg.args = {
-      global: originalFFmpegArgs.global || {},
-      input: {
-        ...(originalFFmpegArgs.input || {}),
-        // Add browser-like headers that Google expects
-        headers:
-          "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n" +
-          "Accept: */*\r\n" +
-          "Accept-Language: en-US,en;q=0.9\r\n" +
-          "Origin: https://www.youtube.com\r\n" +
-          "Referer: https://www.youtube.com/",
-        reconnect: "1",
-        reconnect_streamed: "1",
-        reconnect_delay_max: "5",
-      },
-      output: originalFFmpegArgs.output || [],
-    };
-
-    console.log(
-      "[InvidiousPlugin] Configured FFmpeg with browser headers for Google Video compatibility"
-    );
-  }
+override init(distube: DisTube): void {
+  super.init(distube);
+  
+  // Automatically configure FFmpeg with proper headers for Google Video URLs
+  const originalFFmpegArgs = distube.options.ffmpeg?.args || {};
+  
+  distube.options.ffmpeg = distube.options.ffmpeg || {};
+  distube.options.ffmpeg.args = {
+    global: {
+      ...(originalFFmpegArgs.global || {}),
+      // User-Agent goes in global args
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    },
+    input: {
+      ...(originalFFmpegArgs.input || {}),
+      // Connection stability options
+      reconnect: '1',
+      reconnect_streamed: '1',
+      reconnect_delay_max: '5'
+    },
+    output: originalFFmpegArgs.output || []
+  };
+  
+  console.log('[InvidiousPlugin] ✓ Auto-configured FFmpeg with browser User-Agent');
+}
 
   // Required ExtractorPlugin Methods
 
