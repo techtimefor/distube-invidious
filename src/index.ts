@@ -144,7 +144,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
 
   async getStreamURL(song: Song): Promise<string> {
     const apiUrl = `${this.instance}/api/v1/videos/${song.id}`;
-    const data = (await this.WithTimeout(apiUrl)) as InvidiousVideoResponse;
+    const data = (await this.fetchWithTimeout(apiUrl)) as InvidiousVideoResponse;
 
     // Helper: Check if format is audio-only
     const isAudioFormat = (
@@ -293,7 +293,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
 
   async getRelatedSongs(song: Song): Promise<Song[]> {
     const apiUrl = `${this.instance}/api/v1/videos/${song.id}`;
-    const data = (await this.WithTimeout(apiUrl)) as InvidiousVideoResponse;
+    const data = (await this.fetchWithTimeout(apiUrl)) as InvidiousVideoResponse;
 
     if (!data.recommendedVideos || data.recommendedVideos.length === 0) {
       return [];
@@ -433,7 +433,6 @@ export class InvidiousPlugin extends ExtractorPlugin {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
 
-    
       const response = await fetch(url, {
         method: "GET",
         headers: {
@@ -495,14 +494,14 @@ export class InvidiousPlugin extends ExtractorPlugin {
         name: data.title,
         url: `${this.instance}/watch?v=${data.videoId}`,
         thumbnail: this.getBestThumbnail(data.videoThumbnails),
-        duration: data.lengthSeconds,
-        isLive: data.liveNow,
-        views: data.viewCount,
-       likes: data.likeCount,
-      uploader: {
-        name: data.author,
-       url: `${this.instance}${data.authorUrl}`,
-       },
+                          duration: data.lengthSeconds,
+                          isLive: data.liveNow,
+                          views: data.viewCount,
+                          likes: data.likeCount,
+                          uploader: {
+                            name: data.author,
+                            url: `${this.instance}${data.authorUrl}`,
+                          },
       },
       options,
     );
@@ -523,14 +522,14 @@ export class InvidiousPlugin extends ExtractorPlugin {
       name: data.title,
       url: `${this.instance}/watch?v=${data.videoId}`,
       thumbnail: this.getBestThumbnail(data.videoThumbnails),
-      duration: data.lengthSeconds,
-      isLive: data.liveNow,
-     views: data.viewCount,
-    likes: data.likeCount,
-    uploader: {
-    name: data.author,
-    url: `${this.instance}/channel/${data.authorId}`,
-    },
+                          duration: data.lengthSeconds,
+                          isLive: data.liveNow,
+                          views: data.viewCount,
+                          likes: data.likeCount,
+                          uploader: {
+                            name: data.author,
+                            url: `${this.instance}/channel/${data.authorId}`,
+                          },
     });
 
     return song;
