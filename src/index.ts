@@ -40,28 +40,6 @@ export class InvidiousPlugin extends ExtractorPlugin {
     this.timeout = options.timeout ?? 10000;
   }
 
-  /**
-   * Initialize the plugin with DisTube.
-   * Configures FFmpeg globally with browser-like headers for Google Video compatibility.
-   */
-override init(distube: DisTube): void {
-  super.init(distube);
-  
-  // Try setting it as DisTube expects for command-line args
-  if (!distube.options.ffmpeg) {
-    (distube.options as any).ffmpeg = {
-      path: 'ffmpeg',
-      args: { global: {}, input: {}, output: {} }
-    };
-  }
-  
-  // Set as an array of command-line arguments
-  (distube.options.ffmpeg.args as any).global = [
-    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-  ];
-  
-  console.log('[InvidiousPlugin] ✓ Configured FFmpeg');
-}
 
   // Required ExtractorPlugin Methods
 
