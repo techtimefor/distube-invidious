@@ -33,6 +33,10 @@ export interface InvidiousVideoResponse {
     type: string;
     mimeType?: string;
     encoding?: string;
+    bitrate?: string;
+    contentLength?: string;
+    itag?: string;
+    clen?: string;
   }>;
   hlsUrl?: string;
   dashUrl?: string;
