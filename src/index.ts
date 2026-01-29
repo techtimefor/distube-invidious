@@ -144,7 +144,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
 
   async getStreamURL(song: Song): Promise<string> {
     const apiUrl = `${this.instance}/api/v1/videos/${song.id}`;
-    const data = (await this.fetchWithTimeout(apiUrl)) as InvidiousVideoResponse;
+    const data = (await this.WithTimeout(apiUrl)) as InvidiousVideoResponse;
 
     // Helper: Check if format is audio-only
     const isAudioFormat = (
@@ -293,7 +293,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
 
   async getRelatedSongs(song: Song): Promise<Song[]> {
     const apiUrl = `${this.instance}/api/v1/videos/${song.id}`;
-    const data = (await this.fetchWithTimeout(apiUrl)) as InvidiousVideoResponse;
+    const data = (await this.WithTimeout(apiUrl)) as InvidiousVideoResponse;
 
     if (!data.recommendedVideos || data.recommendedVideos.length === 0) {
       return [];
@@ -433,7 +433,25 @@ export class InvidiousPlugin extends ExtractorPlugin {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
 
+    
       const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          Accept: "*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Accept-Encoding": "gzip, deflate, br",
+          Origin: "https://www.youtube.com",
+          Referer: "https://www.youtube.com/",
+          "Sec-Fetch-Dest": "empty",
+          "Sec-Fetch-Mode": "cors",
+          "Sec-Fetch-Site": "cross-site",
+          "Sec-Ch-Ua":
+            '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          "Sec-Ch-Ua-Mobile": "?0",
+          "Sec-Ch-Ua-Platform": '"Windows"',
+        },
         signal: controller.signal,
       });
 
