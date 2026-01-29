@@ -47,7 +47,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
 override init(distube: DisTube): void {
   super.init(distube);
   
-  // Ensure ffmpeg options exist with proper structure
+  // Try setting it as DisTube expects for command-line args
   if (!distube.options.ffmpeg) {
     (distube.options as any).ffmpeg = {
       path: 'ffmpeg',
@@ -55,15 +55,12 @@ override init(distube: DisTube): void {
     };
   }
   
-  if (!distube.options.ffmpeg.args) {
-    (distube.options.ffmpeg as any).args = { global: {}, input: {}, output: {} };
-  }
-  
-  // Add user agent as a global option
-  (distube.options.ffmpeg.args.global as any).user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  // Set as an array of command-line arguments
+  (distube.options.ffmpeg.args as any).global = [
+    '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  ];
   
   console.log('[InvidiousPlugin] ✓ Configured FFmpeg');
-  console.log('[InvidiousPlugin] FFmpeg args:', JSON.stringify(distube.options.ffmpeg.args, null, 2));
 }
 
   // Required ExtractorPlugin Methods
