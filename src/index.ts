@@ -39,28 +39,6 @@ export class InvidiousPlugin extends ExtractorPlugin {
     this.instance = normalized;
     this.timeout = options.timeout ?? 10000;
   }
-
-/**
- * Get recommended FFmpeg configuration for Google Video URLs.
- * Users should pass this to DisTube's ffmpeg option.
- */
-static getRecommendedFFmpegConfig() {
-  return {
-    path: 'ffmpeg',
-    args: {
-      global: {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-      },
-      input: {
-        reconnect: '1',
-        reconnect_streamed: '1',
-        reconnect_delay_max: '5'
-      },
-      output: []
-    }
-  };
-}
-
   
   // Required ExtractorPlugin Methods
 
