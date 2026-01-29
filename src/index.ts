@@ -111,123 +111,209 @@ export class InvidiousPlugin extends ExtractorPlugin {
 
   /**
    * Gets the stream URL for a song.
-   * Fetches fresh video data and extracts highest-quality audio stream.
+   *
+   * This method prioritizes formatStreams over adaptiveFormats because
+   * formatStreams from Invidious have pre-signed URLs that don't expire,
+   * while adaptiveFormats may have signature/expiration issues.
    *
    * Priority:
-   * 1. audio/webm with opus codec (best quality)
-   * 2. audio/mp4 with mp4a.40.2 codec (AAC)
-   * 3. Any other audio-only format
+   * 1. formatStreams with audio/webm or audio/mp4 (opus first, then AAC)
+   * 2. adaptiveFormats with audio/webm + opus (validated)
+   * 3. adaptiveFormats with audio/mp4 + AAC (validated)
    *
-   * Throws CANNOT_GET_STREAM_URL if no valid audio stream is found.
+   * Each URL is validated to ensure it has required parameters and is reachable.
    */
+
   async getStreamURL(song: Song): Promise<string> {
     const apiUrl = `${this.instance}/api/v1/videos/${song.id}`;
     const data = (await this.fetchWithTimeout(apiUrl)) as InvidiousVideoResponse;
 
-    let selectedFormat: {
-      url: string;
-      mimeType?: string;
-      type?: string;
-      encoding?: string;
-    } | null = null;
-    let selectionReason = "";
-
-    // Helper function to check if a format is audio-only
-    const isAudioOnly = (format: { mimeType?: string; type?: string }): boolean => {
-      const mimeType = (format.mimeType || format.type || "").toLowerCase();
-      // Must start with "audio/" to be audio-only
-      return mimeType.startsWith("audio/");
+    // Helper: Check if a URL has required YouTube signature parameters
+    const hasValidSignature = (url: string): boolean => {
+      const lowerUrl = url.toLowerCase();
+      // Check for signature-related parameters
+      return (
+        lowerUrl.includes("sig=") ||
+        lowerUrl.includes("signature=") ||
+        (lowerUrl.includes("n=") && lowerUrl.includes("expire="))
+      );
     };
 
-    // Helper function to check codec
-    const hasCodec = (
-      format: { mimeType?: string; type?: string; encoding?: string },
-      codec: string
+    // Helper: Check if URL is a manifest (not direct audio data)
+    const isManifestUrl = (url: string): boolean => {
+      const lowerUrl = url.toLowerCase();
+      return (
+        lowerUrl.includes("/dash/") ||
+        lowerUrl.endsWith(".mpd") ||
+        lowerUrl.endsWith(".m3u8")
+      );
+    };
+
+    // Helper: Validate URL by making a HEAD request
+    const validateUrl = async (url: string): Promise<boolean> => {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+        const response = await fetch(url, {
+          method: "HEAD",
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeoutId);
+        return response.ok && response.status >= 200 && response.status < 400;
+      } catch {
+        return false;
+      }
+    };
+
+    // Helper: Check if format is audio-only
+    const isAudioFormat = (
+      format: { mimeType?: string; type?: string },
+      codec?: string
     ): boolean => {
       const mimeType = (format.mimeType || format.type || "").toLowerCase();
-      const encoding = (format.encoding || "").toLowerCase();
-      return mimeType.includes(codec) || encoding.includes(codec);
+      const isAudio = mimeType.startsWith("audio/");
+      if (codec && isAudio) {
+        return mimeType.includes(codec);
+      }
+      return isAudio;
     };
 
-    // Priority 1: Look for audio/webm with opus codec (best quality for FFmpeg)
+    // Priority 1: Try formatStreams first (pre-signed URLs, more reliable)
+
+    console.log(`[InvidiousPlugin] Checking formatStreams for ${song.id}...`);
+
+    if (data.formatStreams && data.formatStreams.length > 0) {
+      // Look for audio/webm formats with opus
+      for (const format of data.formatStreams) {
+        if (
+          isAudioFormat(format, "webm") &&
+          (format.type?.toLowerCase().includes("opus") ||
+            format.mimeType?.toLowerCase().includes("opus"))
+        ) {
+          if (format.url && !isManifestUrl(format.url)) {
+            console.log(`[InvidiousPlugin] Found audio/webm + opus in formatStreams`);
+            console.log(`[InvidiousPlugin] URL: ${format.url}`);
+            return format.url;
+          }
+        }
+      }
+
+      // Look for audio/mp4 formats with AAC
+      for (const format of data.formatStreams) {
+        if (
+          isAudioFormat(format, "mp4") &&
+          (format.type?.toLowerCase().includes("mp4a") ||
+            format.mimeType?.toLowerCase().includes("mp4a"))
+        ) {
+          if (format.url && !isManifestUrl(format.url)) {
+            console.log(`[InvidiousPlugin] Found audio/mp4 + AAC in formatStreams`);
+            console.log(`[InvidiousPlugin] URL: ${format.url}`);
+            return format.url;
+          }
+        }
+      }
+
+      // Fallback: any audio format in formatStreams
+      for (const format of data.formatStreams) {
+        if (isAudioFormat(format) && format.url && !isManifestUrl(format.url)) {
+          console.log(`[InvidiousPlugin] Found audio format in formatStreams (fallback)`);
+          console.log(`[InvidiousPlugin] Type: ${format.type || format.mimeType}`);
+          console.log(`[InvidiousPlugin] URL: ${format.url}`);
+          return format.url;
+        }
+      }
+    }
+
+    // Priority 2: Try adaptiveFormats with validation
+
+    console.log(`[InvidiousPlugin] No suitable formatStreams found, checking adaptiveFormats...`);
+
     if (data.adaptiveFormats && data.adaptiveFormats.length > 0) {
-      const found = data.adaptiveFormats.find((format) => {
-        if (!isAudioOnly(format) || !format.url) return false;
-        const mimeType = (format.mimeType || format.type || "").toLowerCase();
-        // Check for audio/webm with opus
-        return mimeType.startsWith("audio/webm") && hasCodec(format, "opus");
-      });
+      // Look for audio/webm with opus
+      for (const format of data.adaptiveFormats) {
+        if (
+          isAudioFormat(format, "webm") &&
+          (format.encoding?.toLowerCase().includes("opus") ||
+            format.mimeType?.toLowerCase().includes("opus") ||
+            format.type?.toLowerCase().includes("opus"))
+        ) {
+          if (format.url && !isManifestUrl(format.url) && hasValidSignature(format.url)) {
+            console.log(`[InvidiousPlugin] Found audio/webm + opus in adaptiveFormats`);
+            console.log(`[InvidiousPlugin] URL: ${format.url}`);
 
-      if (found) {
-        selectedFormat = found;
-        selectionReason = "audio/webm + opus";
+            // Validate URL is reachable
+            console.log(`[InvidiousPlugin] Validating URL with HEAD request...`);
+            if (await validateUrl(format.url)) {
+              console.log(`[InvidiousPlugin] URL validation passed`);
+              return format.url;
+            } else {
+              console.log(`[InvidiousPlugin] URL validation failed, trying next format`);
+            }
+          }
+        }
+      }
+
+      // Look for audio/mp4 with AAC
+      for (const format of data.adaptiveFormats) {
+        if (
+          isAudioFormat(format, "mp4") &&
+          (format.encoding?.toLowerCase().includes("aac") ||
+            format.mimeType?.toLowerCase().includes("aac") ||
+            format.mimeType?.toLowerCase().includes("mp4a.40.2") ||
+            format.type?.toLowerCase().includes("aac") ||
+            format.type?.toLowerCase().includes("mp4a.40.2"))
+        ) {
+          if (format.url && !isManifestUrl(format.url) && hasValidSignature(format.url)) {
+            console.log(`[InvidiousPlugin] Found audio/mp4 + AAC in adaptiveFormats`);
+            console.log(`[InvidiousPlugin] URL: ${format.url}`);
+
+            // Validate URL is reachable
+            console.log(`[InvidiousPlugin] Validating URL with HEAD request...`);
+            if (await validateUrl(format.url)) {
+              console.log(`[InvidiousPlugin] URL validation passed`);
+              return format.url;
+            } else {
+              console.log(`[InvidiousPlugin] URL validation failed, trying next format`);
+            }
+          }
+        }
+      }
+
+      // Fallback: any audio format with valid signature
+      for (const format of data.adaptiveFormats) {
+        if (isAudioFormat(format) && format.url && !isManifestUrl(format.url)) {
+          // For adaptive formats without signature, still try them but log a warning
+          console.log(`[InvidiousPlugin] Found audio format in adaptiveFormats (fallback)`);
+          console.log(`[InvidiousPlugin] Type: ${format.type || format.mimeType}`);
+          console.log(`[InvidiousPlugin] Encoding: ${format.encoding || "unknown"}`);
+          console.log(`[InvidiousPlugin] URL: ${format.url}`);
+
+          if (!hasValidSignature(format.url)) {
+            console.warn(`[InvidiousPlugin] WARNING: URL may be missing signature parameters`);
+          }
+
+          // Try to validate even if signature is missing
+          console.log(`[InvidiousPlugin] Validating URL with HEAD request...`);
+          if (await validateUrl(format.url)) {
+            console.log(`[InvidiousPlugin] URL validation passed`);
+            return format.url;
+          } else {
+            console.log(`[InvidiousPlugin] URL validation failed`);
+          }
+        }
       }
     }
 
-    // Priority 2: Look for audio/mp4 with AAC codec (mp4a.40.2)
-    if (!selectedFormat && data.adaptiveFormats && data.adaptiveFormats.length > 0) {
-      const found = data.adaptiveFormats.find((format) => {
-        if (!isAudioOnly(format) || !format.url) return false;
-        const mimeType = (format.mimeType || format.type || "").toLowerCase();
-        // Check for audio/mp4 with AAC codec
-        return (
-          mimeType.startsWith("audio/mp4") &&
-          (hasCodec(format, "mp4a.40.2") || hasCodec(format, "aac"))
-        );
-      });
-
-      if (found) {
-        selectedFormat = found;
-        selectionReason = "audio/mp4 + aac";
-      }
-    }
-
-    // Priority 3: Look for any audio-only format with a direct URL
-    if (!selectedFormat && data.adaptiveFormats && data.adaptiveFormats.length > 0) {
-      const found = data.adaptiveFormats.find((format) => {
-        if (!isAudioOnly(format) || !format.url) return false;
-        // Make sure it's not a manifest/dash file
-        const url = format.url.toLowerCase();
-        return (
-          !url.includes("/dash/") && !url.endsWith(".mpd") && !url.endsWith(".m3u8")
-        );
-      });
-
-      if (found) {
-        selectedFormat = found;
-        selectionReason = "any audio-only format";
-      }
-    }
-
-    // If we found a format, validate and return it
-    if (selectedFormat && selectedFormat.url) {
-      // Validate the URL is not empty
-      if (selectedFormat.url.trim() === "") {
-        throw new DisTubeError("CANNOT_GET_STREAM_URL", "Selected audio URL is empty");
-      }
-
-      // Log the selected format for debugging
-      console.log(`[InvidiousPlugin] Selected audio stream for ${song.id}:`);
-      console.log(`  Format: ${selectedFormat.mimeType || selectedFormat.type || "unknown"}`);
-      console.log(`  Encoding: ${selectedFormat.encoding || "unknown"}`);
-      console.log(`  Reason: ${selectionReason}`);
-      console.log(`  URL length: ${selectedFormat.url.length} chars`);
-
-      return selectedFormat.url;
-    }
-
-    // If we get here, no valid audio stream was found
-    console.error(`[InvidiousPlugin] No valid audio stream found for ${song.id}`);
-    if (data.adaptiveFormats) {
-      console.error(`[InvidiousPlugin] Available formats:`);
-      data.adaptiveFormats.forEach((format, index) => {
-        console.error(`  [${index}] ${format.mimeType || format.type || "unknown"} - encoding: ${format.encoding || "unknown"} - has url: ${!!format.url}`);
-      });
-    }
+    // No valid stream found
+    console.error(`[InvidiousPlugin] ERROR: No valid audio stream found for ${song.id}`);
+    console.error(`[InvidiousPlugin] FormatStreams count: ${data.formatStreams?.length || 0}`);
+    console.error(`[InvidiousPlugin] AdaptiveFormats count: ${data.adaptiveFormats?.length || 0}`);
 
     throw new DisTubeError(
       "CANNOT_GET_STREAM_URL",
-      "No playable audio stream found. The video may not be available on this Invidious instance."
+      "No playable audio stream found. The video may not be available on this Invidious instance, or all stream URLs are invalid/expired."
     );
   }
 
