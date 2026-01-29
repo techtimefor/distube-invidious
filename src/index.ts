@@ -47,27 +47,23 @@ export class InvidiousPlugin extends ExtractorPlugin {
 override init(distube: DisTube): void {
   super.init(distube);
   
-  // Automatically configure FFmpeg with proper headers for Google Video URLs
-  const originalFFmpegArgs = distube.options.ffmpeg?.args || {};
+  // Ensure ffmpeg options exist with proper structure
+  if (!distube.options.ffmpeg) {
+    (distube.options as any).ffmpeg = {
+      path: 'ffmpeg',
+      args: { global: {}, input: {}, output: {} }
+    };
+  }
   
-  distube.options.ffmpeg = distube.options.ffmpeg || {};
-  distube.options.ffmpeg.args = {
-    global: {
-      ...(originalFFmpegArgs.global || {}),
-      // User-Agent goes in global args
-      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
-    },
-    input: {
-      ...(originalFFmpegArgs.input || {}),
-      // Connection stability options
-      reconnect: '1',
-      reconnect_streamed: '1',
-      reconnect_delay_max: '5'
-    },
-    output: originalFFmpegArgs.output || []
-  };
+  if (!distube.options.ffmpeg.args) {
+    (distube.options.ffmpeg as any).args = { global: {}, input: {}, output: {} };
+  }
   
-  console.log('[InvidiousPlugin] ✓ Auto-configured FFmpeg with browser User-Agent');
+  // Add user agent as a global option
+  (distube.options.ffmpeg.args.global as any).user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+  
+  console.log('[InvidiousPlugin] ✓ Configured FFmpeg');
+  console.log('[InvidiousPlugin] FFmpeg args:', JSON.stringify(distube.options.ffmpeg.args, null, 2));
 }
 
   // Required ExtractorPlugin Methods
