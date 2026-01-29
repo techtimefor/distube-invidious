@@ -112,49 +112,123 @@ export class InvidiousPlugin extends ExtractorPlugin {
   /**
    * Gets the stream URL for a song.
    * Fetches fresh video data and extracts highest-quality audio stream.
+   *
+   * Priority:
+   * 1. audio/webm with opus codec (best quality)
+   * 2. audio/mp4 with mp4a.40.2 codec (AAC)
+   * 3. Any other audio-only format
+   *
+   * Throws CANNOT_GET_STREAM_URL if no valid audio stream is found.
    */
-
   async getStreamURL(song: Song): Promise<string> {
     const apiUrl = `${this.instance}/api/v1/videos/${song.id}`;
     const data = (await this.fetchWithTimeout(apiUrl)) as InvidiousVideoResponse;
 
-    // Priority 1: Audio-only from adaptiveFormats
-    // Check both 'type' and 'mimeType' fields as different instances may use either
+    let selectedFormat: {
+      url: string;
+      mimeType?: string;
+      type?: string;
+      encoding?: string;
+    } | null = null;
+    let selectionReason = "";
+
+    // Helper function to check if a format is audio-only
+    const isAudioOnly = (format: { mimeType?: string; type?: string }): boolean => {
+      const mimeType = (format.mimeType || format.type || "").toLowerCase();
+      // Must start with "audio/" to be audio-only
+      return mimeType.startsWith("audio/");
+    };
+
+    // Helper function to check codec
+    const hasCodec = (
+      format: { mimeType?: string; type?: string; encoding?: string },
+      codec: string
+    ): boolean => {
+      const mimeType = (format.mimeType || format.type || "").toLowerCase();
+      const encoding = (format.encoding || "").toLowerCase();
+      return mimeType.includes(codec) || encoding.includes(codec);
+    };
+
+    // Priority 1: Look for audio/webm with opus codec (best quality for FFmpeg)
     if (data.adaptiveFormats && data.adaptiveFormats.length > 0) {
-      // First try to find opus audio
-      let bestAudio = data.adaptiveFormats.find((format) => {
-        const mimeType = format.mimeType || format.type || "";
-        return mimeType.includes("audio") && mimeType.includes("opus");
+      const found = data.adaptiveFormats.find((format) => {
+        if (!isAudioOnly(format) || !format.url) return false;
+        const mimeType = (format.mimeType || format.type || "").toLowerCase();
+        // Check for audio/webm with opus
+        return mimeType.startsWith("audio/webm") && hasCodec(format, "opus");
       });
 
-      // If no opus, try AAC
-      if (!bestAudio) {
-        bestAudio = data.adaptiveFormats.find((format) => {
-          const mimeType = format.mimeType || format.type || "";
-          return mimeType.includes("audio") && mimeType.includes("mp4");
-        });
-      }
-
-      // If still no audio, find any audio format
-      if (!bestAudio) {
-        bestAudio = data.adaptiveFormats.find((format) => {
-          const mimeType = format.mimeType || format.type || "";
-          return mimeType.includes("audio");
-        });
-      }
-
-      if (bestAudio && bestAudio.url) {
-        return bestAudio.url;
+      if (found) {
+        selectedFormat = found;
+        selectionReason = "audio/webm + opus";
       }
     }
 
-    // Priority 2: Fallback to first entry in formatStreams
-    if (data.formatStreams && data.formatStreams.length > 0) {
-      return data.formatStreams[0].url;
+    // Priority 2: Look for audio/mp4 with AAC codec (mp4a.40.2)
+    if (!selectedFormat && data.adaptiveFormats && data.adaptiveFormats.length > 0) {
+      const found = data.adaptiveFormats.find((format) => {
+        if (!isAudioOnly(format) || !format.url) return false;
+        const mimeType = (format.mimeType || format.type || "").toLowerCase();
+        // Check for audio/mp4 with AAC codec
+        return (
+          mimeType.startsWith("audio/mp4") &&
+          (hasCodec(format, "mp4a.40.2") || hasCodec(format, "aac"))
+        );
+      });
+
+      if (found) {
+        selectedFormat = found;
+        selectionReason = "audio/mp4 + aac";
+      }
     }
 
-    // Priority 3: Throw error if no valid stream found
-    throw new DisTubeError("CANNOT_GET_STREAM_URL", "No playable stream found");
+    // Priority 3: Look for any audio-only format with a direct URL
+    if (!selectedFormat && data.adaptiveFormats && data.adaptiveFormats.length > 0) {
+      const found = data.adaptiveFormats.find((format) => {
+        if (!isAudioOnly(format) || !format.url) return false;
+        // Make sure it's not a manifest/dash file
+        const url = format.url.toLowerCase();
+        return (
+          !url.includes("/dash/") && !url.endsWith(".mpd") && !url.endsWith(".m3u8")
+        );
+      });
+
+      if (found) {
+        selectedFormat = found;
+        selectionReason = "any audio-only format";
+      }
+    }
+
+    // If we found a format, validate and return it
+    if (selectedFormat && selectedFormat.url) {
+      // Validate the URL is not empty
+      if (selectedFormat.url.trim() === "") {
+        throw new DisTubeError("CANNOT_GET_STREAM_URL", "Selected audio URL is empty");
+      }
+
+      // Log the selected format for debugging
+      console.log(`[InvidiousPlugin] Selected audio stream for ${song.id}:`);
+      console.log(`  Format: ${selectedFormat.mimeType || selectedFormat.type || "unknown"}`);
+      console.log(`  Encoding: ${selectedFormat.encoding || "unknown"}`);
+      console.log(`  Reason: ${selectionReason}`);
+      console.log(`  URL length: ${selectedFormat.url.length} chars`);
+
+      return selectedFormat.url;
+    }
+
+    // If we get here, no valid audio stream was found
+    console.error(`[InvidiousPlugin] No valid audio stream found for ${song.id}`);
+    if (data.adaptiveFormats) {
+      console.error(`[InvidiousPlugin] Available formats:`);
+      data.adaptiveFormats.forEach((format, index) => {
+        console.error(`  [${index}] ${format.mimeType || format.type || "unknown"} - encoding: ${format.encoding || "unknown"} - has url: ${!!format.url}`);
+      });
+    }
+
+    throw new DisTubeError(
+      "CANNOT_GET_STREAM_URL",
+      "No playable audio stream found. The video may not be available on this Invidious instance."
+    );
   }
 
   /**
