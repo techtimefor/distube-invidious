@@ -242,15 +242,8 @@ export class InvidiousPlugin extends ExtractorPlugin {
           if (format.url && !isManifestUrl(format.url) && hasValidSignature(format.url)) {
             console.log(`[InvidiousPlugin] Found audio/webm + opus in adaptiveFormats`);
             console.log(`[InvidiousPlugin] URL: ${format.url}`);
-
-            // Validate URL is reachable
-            console.log(`[InvidiousPlugin] Validating URL with HEAD request...`);
-            if (await validateUrl(format.url)) {
-              console.log(`[InvidiousPlugin] URL validation passed`);
-              return format.url;
-            } else {
-              console.log(`[InvidiousPlugin] URL validation failed, trying next format`);
-            }
+            console.log(`[InvidiousPlugin] Has valid signature, skipping HEAD validation (Google servers don't respond to HEAD)`);
+            return format.url;
           }
         }
       }
@@ -268,15 +261,8 @@ export class InvidiousPlugin extends ExtractorPlugin {
           if (format.url && !isManifestUrl(format.url) && hasValidSignature(format.url)) {
             console.log(`[InvidiousPlugin] Found audio/mp4 + AAC in adaptiveFormats`);
             console.log(`[InvidiousPlugin] URL: ${format.url}`);
-
-            // Validate URL is reachable
-            console.log(`[InvidiousPlugin] Validating URL with HEAD request...`);
-            if (await validateUrl(format.url)) {
-              console.log(`[InvidiousPlugin] URL validation passed`);
-              return format.url;
-            } else {
-              console.log(`[InvidiousPlugin] URL validation failed, trying next format`);
-            }
+            console.log(`[InvidiousPlugin] Has valid signature, skipping HEAD validation (Google servers don't respond to HEAD)`);
+            return format.url;
           }
         }
       }
@@ -284,7 +270,6 @@ export class InvidiousPlugin extends ExtractorPlugin {
       // Fallback: any audio format with valid signature
       for (const format of data.adaptiveFormats) {
         if (isAudioFormat(format) && format.url && !isManifestUrl(format.url)) {
-          // For adaptive formats without signature, still try them but log a warning
           console.log(`[InvidiousPlugin] Found audio format in adaptiveFormats (fallback)`);
           console.log(`[InvidiousPlugin] Type: ${format.type || format.mimeType}`);
           console.log(`[InvidiousPlugin] Encoding: ${format.encoding || "unknown"}`);
@@ -294,14 +279,8 @@ export class InvidiousPlugin extends ExtractorPlugin {
             console.warn(`[InvidiousPlugin] WARNING: URL may be missing signature parameters`);
           }
 
-          // Try to validate even if signature is missing
-          console.log(`[InvidiousPlugin] Validating URL with HEAD request...`);
-          if (await validateUrl(format.url)) {
-            console.log(`[InvidiousPlugin] URL validation passed`);
-            return format.url;
-          } else {
-            console.log(`[InvidiousPlugin] URL validation failed`);
-          }
+          console.log(`[InvidiousPlugin] Returning URL (signature validated, skipping HEAD check)`);
+          return format.url;
         }
       }
     }
