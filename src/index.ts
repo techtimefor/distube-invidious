@@ -133,10 +133,8 @@ export class InvidiousPlugin extends ExtractorPlugin {
   /**
    * Gets the stream URL for a song.
    *
-   * This method:
-   * 1. Searches adaptiveFormats for audio-only streams
-   * 2. Validates URLs leniently (lets FFmpeg try even if validation fails)
-   * 3. Prioritizes opus by quality (highest bitrate first), then AAC
+   * This method downloads audio to a temporary file to avoid FFmpeg issues with direct streaming URLs.
+   * It prioritizes opus by quality (highest bitrate first), then AAC.
    *
    * Quality priority:
    * 1. Opus audio (highest bitrate → lowest bitrate)
@@ -148,20 +146,10 @@ export class InvidiousPlugin extends ExtractorPlugin {
     const apiUrl = `${this.instance}/api/v1/videos/${song.id}`;
     const data = (await this.fetchWithTimeout(apiUrl)) as InvidiousVideoResponse;
 
-    // Helper: Check if URL is a manifest (not direct audio data)
-    const isManifestUrl = (url: string): boolean => {
-      const lowerUrl = url.toLowerCase();
-      return (
-        lowerUrl.includes("/dash/") ||
-        lowerUrl.endsWith(".mpd") ||
-        lowerUrl.endsWith(".m3u8")
-      );
-    };
-
     // Helper: Check if format is audio-only
     const isAudioFormat = (
       format: { mimeType?: string; type?: string },
-      codec?: string
+        codec?: string
     ): boolean => {
       const mimeType = (format.mimeType || format.type || "").toLowerCase();
       const isAudio = mimeType.startsWith("audio/");
@@ -189,66 +177,6 @@ export class InvidiousPlugin extends ExtractorPlugin {
       return 0;
     };
 
-    // Helper: Validate URL leniently (always returns true, logs errors but continues)
-    const validateUrl = async (url: string): Promise<boolean> => {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-        const response = await fetch(url, {
-          method: "HEAD",
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            Accept: "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            Origin: "https://www.youtube.com",
-            Referer: "https://www.youtube.com/",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "cross-site",
-            "Sec-Ch-Ua":
-              '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-          },
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        // Accept 2xx and 3xx status codes
-        return response.status >= 200 && response.status < 400;
-      } catch (error) {
-        // On error, let FFmpeg try - it might work anyway
-        console.log(
-          `[InvidiousPlugin] Validation error, continuing: ${(error as Error).message}`
-        );
-        return true;
-      }
-    };
-
-    // Helper: Try to validate and return a URL
-    const tryUrl = async (
-      url: string,
-      formatName: string
-    ): Promise<string | null> => {
-      if (!url || isManifestUrl(url)) {
-        return null;
-      }
-
-      console.log(`[InvidiousPlugin] Trying ${formatName}`);
-      console.log(`[InvidiousPlugin] URL: ${url.substring(0, 100)}...`);
-
-      await validateUrl(url);
-
-      console.log(`[InvidiousPlugin] ✓ Selected ${formatName}`);
-      return url;
-    };
-
-    // Extract and sort audio formats by quality
-
     console.log(`[InvidiousPlugin] Processing ${song.id}...`);
 
     // Collect all opus formats
@@ -275,7 +203,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
     // Extract from adaptiveFormats
     if (data.adaptiveFormats && data.adaptiveFormats.length > 0) {
       for (const format of data.adaptiveFormats) {
-        if (!isAudioFormat(format) || !format.url || isManifestUrl(format.url)) {
+        if (!isAudioFormat(format) || !format.url) {
           continue;
         }
 
@@ -313,44 +241,10 @@ export class InvidiousPlugin extends ExtractorPlugin {
       `[InvidiousPlugin] Found ${opusFormats.length} opus, ${aacFormats.length} AAC, ${otherFormats.length} other audio formats`
     );
 
-    // Priority 1: Try opus formats (highest to lowest bitrate)
-
-    for (const format of opusFormats) {
-      const result = await tryUrl(
-        format.url,
-        `opus (bitrate: ${format.bitrate}, itag: ${format.itag})`
-      );
-      if (result) return result;
-    }
-
-    // Priority 2: Try AAC formats (highest to lowest bitrate)
-
-    for (const format of aacFormats) {
-      const result = await tryUrl(
-        format.url,
-        `AAC (bitrate: ${format.bitrate}, itag: ${format.itag})`
-      );
-      if (result) return result;
-    }
-
-    // Priority 3: Try other audio formats
-
-    for (const format of otherFormats) {
-      const result = await tryUrl(
-        format.url,
-        `${format.type} (bitrate: ${format.bitrate})`
-      );
-      if (result) return result;
-    }
-
-    // No valid stream found - try downloading as last resort
-
-    console.log(`[InvidiousPlugin] No stream URLs validated, attempting download...`);
-
-    // Try to download the highest bitrate opus
+    // Priority 1: Try to download opus (highest bitrate first)
     if (opusFormats.length > 0) {
-      const bestOpus = opusFormats[0]; // Already sorted by bitrate (highest first)
-      console.log(`[InvidiousPlugin] Downloading opus audio (bitrate: ${bestOpus.bitrate})...`);
+      const bestOpus = opusFormats[0];
+      console.log(`[InvidiousPlugin] Downloading opus audio (bitrate: ${bestOpus.bitrate}, itag: ${bestOpus.itag})...`);
       try {
         return await this.downloadAudio(bestOpus.url, song.id);
       } catch (error) {
@@ -358,10 +252,10 @@ export class InvidiousPlugin extends ExtractorPlugin {
       }
     }
 
-    // Try to download AAC
+    // Priority 2: Try to download AAC (highest bitrate first)
     if (aacFormats.length > 0) {
-      const bestAac = aacFormats[0]; // Already sorted by bitrate (highest first)
-      console.log(`[InvidiousPlugin] Downloading AAC audio (bitrate: ${bestAac.bitrate})...`);
+      const bestAac = aacFormats[0];
+      console.log(`[InvidiousPlugin] Downloading AAC audio (bitrate: ${bestAac.bitrate}, itag: ${bestAac.itag})...`);
       try {
         return await this.downloadAudio(bestAac.url, song.id);
       } catch (error) {
@@ -369,17 +263,27 @@ export class InvidiousPlugin extends ExtractorPlugin {
       }
     }
 
-    // Everything failed - throw error
+    // Priority 3: Try to download other audio formats (highest bitrate first)
+    if (otherFormats.length > 0) {
+      const bestOther = otherFormats[0];
+      console.log(`[InvidiousPlugin] Downloading ${bestOther.type} audio (bitrate: ${bestOther.bitrate})...`);
+      try {
+        return await this.downloadAudio(bestOther.url, song.id);
+      } catch (error) {
+        console.log(`[InvidiousPlugin] ${bestOther.type} download failed: ${(error as Error).message}`);
+      }
+    }
 
-    console.error(`[InvidiousPlugin] ERROR: All methods failed for ${song.id}`);
-    console.error(`[InvidiousPlugin] Opus formats tried: ${opusFormats.length}`);
-    console.error(`[InvidiousPlugin] AAC formats tried: ${aacFormats.length}`);
-    console.error(`[InvidiousPlugin] Download attempts made, all failed`);
+    // Everything failed - throw error
+    console.error(`[InvidiousPlugin] ERROR: All download attempts failed for ${song.id}`);
+    console.error(`[InvidiousPlugin] Opus formats: ${opusFormats.length}`);
+    console.error(`[InvidiousPlugin] AAC formats: ${aacFormats.length}`);
+    console.error(`[InvidiousPlugin] Other formats: ${otherFormats.length}`);
     console.error(`[InvidiousPlugin] Try: different Invidious instance or check if video is available`);
 
     throw new DisTubeError(
       "CANNOT_GET_STREAM_URL",
-      "All playback methods failed (URL validation + download). Try a different Invidious instance or check if the video is available."
+      "All download methods failed. Try a different Invidious instance or check if the video is available."
     );
   }
 
@@ -397,12 +301,12 @@ export class InvidiousPlugin extends ExtractorPlugin {
 
     // Return up to 10 related songs
     return data.recommendedVideos.slice(0, 10).map((video) =>
-      this.createSongFromData(video),
+    this.createSongFromData(video),
     );
   }
 
   // Playlist Resolution
-  
+
   /**
    * Public method for direct playlist resolution.
    */
@@ -423,26 +327,26 @@ export class InvidiousPlugin extends ExtractorPlugin {
 
     // Create Song objects from playlist videos
     const songs = data.videos.map((video) =>
-      this.createSongFromData({
-        videoId: video.videoId,
-        title: video.title,
-        author: video.author,
-        authorId: data.authorId,
-        authorUrl: `/channel/${data.authorId}`,
-        lengthSeconds: video.lengthSeconds,
-        videoThumbnails: video.videoThumbnails.map((t) => ({
-          quality: "",
-          url: t.url,
-          width: t.width,
-          height: t.height,
-        })),
-        viewCount: 0,
-        likeCount: 0,
-        liveNow: false,
-        recommendedVideos: [],
-        formatStreams: [],
+    this.createSongFromData({
+      videoId: video.videoId,
+      title: video.title,
+      author: video.author,
+      authorId: data.authorId,
+      authorUrl: `/channel/${data.authorId}`,
+      lengthSeconds: video.lengthSeconds,
+      videoThumbnails: video.videoThumbnails.map((t) => ({
+        quality: "",
+        url: t.url,
+        width: t.width,
+        height: t.height,
+      })),
+      viewCount: 0,
+      likeCount: 0,
+      liveNow: false,
+      recommendedVideos: [],
+      formatStreams: [],
         adaptiveFormats: [],
-      } as InvidiousVideoResponse),
+    } as InvidiousVideoResponse),
     );
 
     // Create Playlist object
@@ -453,7 +357,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
         id: data.playlistId,
         url: `${this.instance}/playlist?list=${data.playlistId}`,
         thumbnail: this.getBestThumbnail(data.videos[0]?.videoThumbnails || []),
-        songs,
+                                  songs,
       },
       options,
     );
@@ -461,7 +365,7 @@ export class InvidiousPlugin extends ExtractorPlugin {
     return playlist as Playlist<T>;
   }
 
-  
+
   // Private Helper Methods
 
   /**
@@ -576,11 +480,11 @@ export class InvidiousPlugin extends ExtractorPlugin {
         duration: data.lengthSeconds,
         isLive: data.liveNow,
         views: data.viewCount,
-        likes: data.likeCount,
-        uploader: {
-          name: data.author,
-          url: `${this.instance}${data.authorUrl}`,
-        },
+       likes: data.likeCount,
+      uploader: {
+        name: data.author,
+       url: `${this.instance}${data.authorUrl}`,
+       },
       },
       options,
     );
@@ -603,12 +507,12 @@ export class InvidiousPlugin extends ExtractorPlugin {
       thumbnail: this.getBestThumbnail(data.videoThumbnails),
       duration: data.lengthSeconds,
       isLive: data.liveNow,
-      views: data.viewCount,
-      likes: data.likeCount,
-      uploader: {
-        name: data.author,
-        url: `${this.instance}/channel/${data.authorId}`,
-      },
+     views: data.viewCount,
+    likes: data.likeCount,
+    uploader: {
+    name: data.author,
+    url: `${this.instance}/channel/${data.authorId}`,
+    },
     });
 
     return song;
