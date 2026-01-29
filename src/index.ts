@@ -12,6 +12,7 @@ import type {
   InvidiousPlaylistResponse,
   InvidiousSearchResponse,
 } from "./types.js";
+import { fixUrl as decodeCipherUrl } from "./cipherDecoder.js";
 import {
   stripQuery,
   isYouTubeUrl,
@@ -112,17 +113,17 @@ export class InvidiousPlugin extends ExtractorPlugin {
   /**
    * Gets the stream URL for a song.
    *
-   * IMPORTANT NOTES:
-   * - Invidious URLs may have n= cipher that requires decoding (not implemented here as it
-   *   requires parsing YouTube's player JavaScript which changes frequently)
-   * - This method validates URLs using GET requests with Range headers since HEAD fails
-   * - ratebypass=yes is ensured to be present for better compatibility
+   * This method:
+   * 1. Searches adaptiveFormats for audio-only streams
+   * 2. Decodes the n= cipher parameter using YouTube's transform algorithm
+   * 3. Adds ratebypass=yes for compatibility
+   * 4. Validates URLs using GET with Range headers
+   * 5. Prioritizes opus by quality (highest bitrate first), then AAC
    *
-   * Priority:
-   * 1. formatStreams (most reliable, pre-signed URLs)
-   * 2. adaptiveFormats opus (validated)
-   * 3. adaptiveFormats AAC (validated)
-   * 4. adaptiveFormats any audio (validated)
+   * Quality priority:
+   * 1. Opus audio (highest bitrate → lowest bitrate)
+   * 2. AAC audio (highest bitrate → lowest bitrate)
+   * 3. Any other audio format
    */
 
   async getStreamURL(song: Song): Promise<string> {
@@ -139,15 +140,6 @@ export class InvidiousPlugin extends ExtractorPlugin {
       );
     };
 
-    // Helper: Ensure ratebypass=yes is present (required for many YouTube streams)
-    const ensureRatebypass = (url: string): string => {
-      if (!url.toLowerCase().includes("ratebypass=")) {
-        const separator = url.includes("?") ? "&" : "?";
-        return `${url}${separator}ratebypass=yes`;
-      }
-      return url;
-    };
-
     // Helper: Check if format is audio-only
     const isAudioFormat = (
       format: { mimeType?: string; type?: string },
@@ -161,23 +153,39 @@ export class InvidiousPlugin extends ExtractorPlugin {
       return isAudio;
     };
 
-    // Helper: Validate URL using GET with Range header (more reliable than HEAD)
+    // Helper: Extract bitrate from format (for quality sorting)
+    const getBitrate = (format: {
+      bitrate?: string;
+      contentLength?: string;
+      clen?: string;
+    }): number => {
+      if (format.bitrate) {
+        return parseInt(format.bitrate, 10);
+      }
+      if (format.contentLength) {
+        return parseInt(format.contentLength, 10);
+      }
+      if (format.clen) {
+        return parseInt(format.clen, 10);
+      }
+      return 0;
+    };
+
+    // Helper: Validate URL using GET with Range header
     const validateUrl = async (url: string): Promise<boolean> => {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-        // Use GET with Range header instead of HEAD (Google servers respond to this)
         const response = await fetch(url, {
           method: "GET",
           headers: {
-            Range: "bytes=0-1", // Only request first byte
+            Range: "bytes=0-1",
           },
           signal: controller.signal,
         });
 
         clearTimeout(timeoutId);
-        // Accept 206 (Partial Content) or 200 (OK)
         return response.status === 206 || response.status === 200;
       } catch (error) {
         console.log(`[InvidiousPlugin] Validation failed: ${(error as Error).message}`);
@@ -185,136 +193,146 @@ export class InvidiousPlugin extends ExtractorPlugin {
       }
     };
 
-    // Helper: Try to validate and return a URL, with fallback
+    // Helper: Process and validate a URL
     const tryUrl = async (
       url: string,
-      formatName: string
+      formatName: string,
+      decodeCipher: boolean = true
     ): Promise<string | null> => {
       if (!url || isManifestUrl(url)) {
         return null;
       }
 
-      // Ensure ratebypass=yes is present
-      url = ensureRatebypass(url);
+      // Decode n= cipher if present and requested
+      if (decodeCipher && url.includes("n=")) {
+        try {
+          console.log(`[InvidiousPlugin] Decoding n= cipher...`);
+          url = await decodeCipherUrl(url);
+          console.log(`[InvidiousPlugin] ✓ Cipher decoded`);
+        } catch (error) {
+          console.log(`[InvidiousPlugin] ⚠ Cipher decode failed: ${(error as Error).message}`);
+          // Continue with original URL
+        }
+      }
 
       console.log(`[InvidiousPlugin] Trying ${formatName}`);
       console.log(`[InvidiousPlugin] URL: ${url.substring(0, 100)}...`);
-      console.log(`[InvidiousPlugin] Validating with GET + Range: bytes=0-1...`);
 
       if (await validateUrl(url)) {
         console.log(`[InvidiousPlugin] ✓ Validation passed!`);
         return url;
       } else {
-        console.log(`[InvidiousPlugin] ✗ Validation failed, trying next format`);
+        console.log(`[InvidiousPlugin] ✗ Validation failed`);
         return null;
       }
     };
 
-    // Priority 1: Try formatStreams (pre-signed URLs, most reliable)
+    // Extract and sort audio formats by quality
 
-    console.log(`[InvidiousPlugin] Checking formatStreams for ${song.id}...`);
+    console.log(`[InvidiousPlugin] Processing ${song.id}...`);
 
-    if (data.formatStreams && data.formatStreams.length > 0) {
-      for (const format of data.formatStreams) {
-        // Try audio/webm + opus
-        if (
-          isAudioFormat(format, "webm") &&
-          (format.type?.toLowerCase().includes("opus") ||
-            format.mimeType?.toLowerCase().includes("opus"))
-        ) {
-          if (format.url) {
-            const result = await tryUrl(format.url, "formatStreams audio/webm + opus");
-            if (result) return result;
-          }
+    // Collect all opus formats
+    const opusFormats: Array<{
+      url: string;
+      bitrate: number;
+      itag?: string;
+    }> = [];
+
+    // Collect all AAC formats
+    const aacFormats: Array<{
+      url: string;
+      bitrate: number;
+      itag?: string;
+    }> = [];
+
+    // Collect other audio formats
+    const otherFormats: Array<{
+      url: string;
+      type: string;
+      bitrate: number;
+    }> = [];
+
+    // Extract from adaptiveFormats
+    if (data.adaptiveFormats && data.adaptiveFormats.length > 0) {
+      for (const format of data.adaptiveFormats) {
+        if (!isAudioFormat(format) || !format.url || isManifestUrl(format.url)) {
+          continue;
         }
 
-        // Try audio/mp4 + AAC
-        if (
-          isAudioFormat(format, "mp4") &&
-          (format.type?.toLowerCase().includes("mp4a") ||
-            format.type?.toLowerCase().includes("aac") ||
-            format.mimeType?.toLowerCase().includes("mp4a") ||
-            format.mimeType?.toLowerCase().includes("aac"))
-        ) {
-          if (format.url) {
-            const result = await tryUrl(format.url, "formatStreams audio/mp4 + AAC");
-            if (result) return result;
-          }
-        }
-      }
+        const mimeType = (format.mimeType || format.type || "").toLowerCase();
+        const bitrate = getBitrate(format);
 
-      // Fallback: Try any audio format in formatStreams
-      for (const format of data.formatStreams) {
-        if (isAudioFormat(format) && format.url) {
-          const result = await tryUrl(
-            format.url,
-            `formatStreams ${format.type || format.mimeType}`
-          );
-          if (result) return result;
+        if (mimeType.includes("opus")) {
+          opusFormats.push({
+            url: format.url,
+            bitrate,
+            itag: (format as any).itag,
+          });
+        } else if (mimeType.includes("aac") || mimeType.includes("mp4a")) {
+          aacFormats.push({
+            url: format.url,
+            bitrate,
+            itag: (format as any).itag,
+          });
+        } else {
+          otherFormats.push({
+            url: format.url,
+            type: format.mimeType || format.type || "unknown",
+            bitrate,
+          });
         }
       }
     }
 
-    // Priority 2: Try adaptiveFormats (may require cipher decoding)
+    // Sort formats by bitrate (highest first)
+    opusFormats.sort((a, b) => b.bitrate - a.bitrate);
+    aacFormats.sort((a, b) => b.bitrate - a.bitrate);
+    otherFormats.sort((a, b) => b.bitrate - a.bitrate);
 
-    console.log(`[InvidiousPlugin] No valid formatStreams found, checking adaptiveFormats...`);
+    console.log(`[InvidiousPlugin] Found ${opusFormats.length} opus, ${aacFormats.length} AAC, ${otherFormats.length} other audio formats`);
 
-    if (data.adaptiveFormats && data.adaptiveFormats.length > 0) {
-      // Try audio/webm + opus
-      for (const format of data.adaptiveFormats) {
-        if (
-          isAudioFormat(format, "webm") &&
-          (format.encoding?.toLowerCase().includes("opus") ||
-            format.mimeType?.toLowerCase().includes("opus") ||
-            format.type?.toLowerCase().includes("opus"))
-        ) {
-          if (format.url) {
-            const result = await tryUrl(format.url, "adaptiveFormats audio/webm + opus");
-            if (result) return result;
-          }
-        }
-      }
+    // Priority 1: Try opus formats (highest to lowest bitrate)
 
-      // Try audio/mp4 + AAC (more compatible)
-      for (const format of data.adaptiveFormats) {
-        if (
-          isAudioFormat(format, "mp4") &&
-          (format.encoding?.toLowerCase().includes("aac") ||
-            format.mimeType?.toLowerCase().includes("aac") ||
-            format.mimeType?.toLowerCase().includes("mp4a.40.2") ||
-            format.type?.toLowerCase().includes("aac") ||
-            format.type?.toLowerCase().includes("mp4a.40.2"))
-        ) {
-          if (format.url) {
-            const result = await tryUrl(format.url, "adaptiveFormats audio/mp4 + AAC");
-            if (result) return result;
-          }
-        }
-      }
+    for (const format of opusFormats) {
+      const result = await tryUrl(
+        format.url,
+        `opus (bitrate: ${format.bitrate}, itag: ${format.itag})`
+      );
+      if (result) return result;
+    }
 
-      // Fallback: Try any audio format in adaptiveFormats
-      for (const format of data.adaptiveFormats) {
-        if (isAudioFormat(format) && format.url) {
-          const result = await tryUrl(
-            format.url,
-            `adaptiveFormats ${format.type || format.mimeType}`
-          );
-          if (result) return result;
-        }
-      }
+    // Priority 2: Try AAC formats (highest to lowest bitrate)
+
+    for (const format of aacFormats) {
+      const result = await tryUrl(
+        format.url,
+        `AAC (bitrate: ${format.bitrate}, itag: ${format.itag})`
+      );
+      if (result) return result;
+    }
+
+    // Priority 3: Try other audio formats
+
+    for (const format of otherFormats) {
+      const result = await tryUrl(
+        format.url,
+        `${format.type} (bitrate: ${format.bitrate})`
+      );
+      if (result) return result;
     }
 
     // No valid stream found - throw error
 
     console.error(`[InvidiousPlugin] ERROR: No valid audio stream found for ${song.id}`);
-    console.error(`[InvidiousPlugin] FormatStreams count: ${data.formatStreams?.length || 0}`);
-    console.error(`[InvidiousPlugin] AdaptiveFormats count: ${data.adaptiveFormats?.length || 0}`);
-    console.error(`[InvidiousPlugin] NOTE: If URLs contain n= parameter, they may need cipher decoding`);
-    console.error(`[InvidiousPlugin] NOTE: Try a different Invidious instance or check if the video is region-restricted`);
+    console.error(`[InvidiousPlugin] Opus formats tried: ${opusFormats.length}`);
+    console.error(`[InvidiousPlugin] AAC formats tried: ${aacFormats.length}`);
+    console.error(`[InvidiousPlugin] Other formats tried: ${otherFormats.length}`);
+    console.error(`[InvidiousPlugin] All URLs failed validation`);
+    console.error(`[InvidiousPlugin] Try: different Invidious instance, check region restrictions, or check if video is available`);
 
     throw new DisTubeError(
       "CANNOT_GET_STREAM_URL",
-      "No playable audio stream found. All URLs failed validation. The video may require n= cipher decoding (not implemented), or the Invidious instance may be having issues."
+      "No playable audio stream found. All URLs failed validation. Try a different Invidious instance or check if the video is available."
     );
   }
 
