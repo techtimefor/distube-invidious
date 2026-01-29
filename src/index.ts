@@ -1,4 +1,5 @@
 import {
+  DisTube,
   ExtractorPlugin,
   Playlist,
   ResolveOptions,
@@ -12,7 +13,6 @@ import type {
   InvidiousPlaylistResponse,
   InvidiousSearchResponse,
 } from "./types.js";
-import { fixUrl as decodeCipherUrl } from "./cipherDecoder.js";
 import {
   stripQuery,
   isYouTubeUrl,
@@ -38,6 +38,40 @@ export class InvidiousPlugin extends ExtractorPlugin {
     }
     this.instance = normalized;
     this.timeout = options.timeout ?? 10000;
+  }
+
+  /**
+   * Initialize the plugin with DisTube.
+   * Configures FFmpeg globally with browser-like headers for Google Video compatibility.
+   */
+  override init(distube: DisTube): void {
+    super.init(distube);
+
+    // Automatically configure FFmpeg with proper headers for Google Video URLs
+    const originalFFmpegArgs = distube.options.ffmpeg?.args || {};
+
+    distube.options.ffmpeg = distube.options.ffmpeg || {};
+    distube.options.ffmpeg.args = {
+      global: originalFFmpegArgs.global || {},
+      input: {
+        ...(originalFFmpegArgs.input || {}),
+        // Add browser-like headers that Google expects
+        headers:
+          "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\r\n" +
+          "Accept: */*\r\n" +
+          "Accept-Language: en-US,en;q=0.9\r\n" +
+          "Origin: https://www.youtube.com\r\n" +
+          "Referer: https://www.youtube.com/",
+        reconnect: "1",
+        reconnect_streamed: "1",
+        reconnect_delay_max: "5",
+      },
+      output: originalFFmpegArgs.output || [],
+    };
+
+    console.log(
+      "[InvidiousPlugin] Configured FFmpeg with browser headers for Google Video compatibility"
+    );
   }
 
   // Required ExtractorPlugin Methods
@@ -115,10 +149,8 @@ export class InvidiousPlugin extends ExtractorPlugin {
    *
    * This method:
    * 1. Searches adaptiveFormats for audio-only streams
-   * 2. Decodes the n= cipher parameter using YouTube's transform algorithm
-   * 3. Adds ratebypass=yes for compatibility
-   * 4. Validates URLs using GET with Range headers
-   * 5. Prioritizes opus by quality (highest bitrate first), then AAC
+   * 2. Validates URLs leniently (lets FFmpeg try even if validation fails)
+   * 3. Prioritizes opus by quality (highest bitrate first), then AAC
    *
    * Quality priority:
    * 1. Opus audio (highest bitrate → lowest bitrate)
@@ -171,60 +203,62 @@ export class InvidiousPlugin extends ExtractorPlugin {
       return 0;
     };
 
-    // Helper: Validate URL using GET with Range header
+    // Helper: Validate URL leniently (always returns true, logs errors but continues)
     const validateUrl = async (url: string): Promise<boolean> => {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 5000);
 
         const response = await fetch(url, {
-          method: "GET",
+          method: "HEAD",
           headers: {
-            Range: "bytes=0-1",
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            Accept: "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            Origin: "https://www.youtube.com",
+            Referer: "https://www.youtube.com/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "cross-site",
+            "Sec-Ch-Ua":
+              '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
           },
           signal: controller.signal,
         });
 
         clearTimeout(timeoutId);
-        return response.status === 206 || response.status === 200;
+
+        // Accept 2xx and 3xx status codes
+        return response.status >= 200 && response.status < 400;
       } catch (error) {
-        console.log(`[InvidiousPlugin] Validation failed: ${(error as Error).message}`);
-        return false;
+        // On error, let FFmpeg try - it might work anyway
+        console.log(
+          `[InvidiousPlugin] Validation error, continuing: ${(error as Error).message}`
+        );
+        return true;
       }
     };
 
-    // Helper: Process and validate a URL
+    // Helper: Try to validate and return a URL
     const tryUrl = async (
       url: string,
-      formatName: string,
-      decodeCipher: boolean = true
+      formatName: string
     ): Promise<string | null> => {
       if (!url || isManifestUrl(url)) {
         return null;
       }
 
-      // Decode n= cipher if present and requested
-      if (decodeCipher && url.includes("n=")) {
-        try {
-          console.log(`[InvidiousPlugin] Decoding n= cipher...`);
-          url = await decodeCipherUrl(url);
-          console.log(`[InvidiousPlugin] ✓ Cipher decoded`);
-        } catch (error) {
-          console.log(`[InvidiousPlugin] ⚠ Cipher decode failed: ${(error as Error).message}`);
-          // Continue with original URL
-        }
-      }
-
       console.log(`[InvidiousPlugin] Trying ${formatName}`);
       console.log(`[InvidiousPlugin] URL: ${url.substring(0, 100)}...`);
 
-      if (await validateUrl(url)) {
-        console.log(`[InvidiousPlugin] ✓ Validation passed!`);
-        return url;
-      } else {
-        console.log(`[InvidiousPlugin] ✗ Validation failed`);
-        return null;
-      }
+      await validateUrl(url);
+
+      console.log(`[InvidiousPlugin] ✓ Selected ${formatName}`);
+      return url;
     };
 
     // Extract and sort audio formats by quality
@@ -289,9 +323,13 @@ export class InvidiousPlugin extends ExtractorPlugin {
     aacFormats.sort((a, b) => b.bitrate - a.bitrate);
     otherFormats.sort((a, b) => b.bitrate - a.bitrate);
 
-    console.log(`[InvidiousPlugin] Found ${opusFormats.length} opus, ${aacFormats.length} AAC, ${otherFormats.length} other audio formats`);
+    console.log(
+      `[InvidiousPlugin] Found ${opusFormats.length} opus, ${aacFormats.length} AAC, ${otherFormats.length} other audio formats`
+    );
 
+    // ============================================================================
     // Priority 1: Try opus formats (highest to lowest bitrate)
+    // ============================================================================
 
     for (const format of opusFormats) {
       const result = await tryUrl(
@@ -301,7 +339,9 @@ export class InvidiousPlugin extends ExtractorPlugin {
       if (result) return result;
     }
 
+    // ============================================================================
     // Priority 2: Try AAC formats (highest to lowest bitrate)
+    // ============================================================================
 
     for (const format of aacFormats) {
       const result = await tryUrl(
@@ -311,7 +351,9 @@ export class InvidiousPlugin extends ExtractorPlugin {
       if (result) return result;
     }
 
+    // ============================================================================
     // Priority 3: Try other audio formats
+    // ============================================================================
 
     for (const format of otherFormats) {
       const result = await tryUrl(
@@ -321,18 +363,19 @@ export class InvidiousPlugin extends ExtractorPlugin {
       if (result) return result;
     }
 
+    // ============================================================================
     // No valid stream found - throw error
+    // ============================================================================
 
     console.error(`[InvidiousPlugin] ERROR: No valid audio stream found for ${song.id}`);
     console.error(`[InvidiousPlugin] Opus formats tried: ${opusFormats.length}`);
     console.error(`[InvidiousPlugin] AAC formats tried: ${aacFormats.length}`);
     console.error(`[InvidiousPlugin] Other formats tried: ${otherFormats.length}`);
-    console.error(`[InvidiousPlugin] All URLs failed validation`);
-    console.error(`[InvidiousPlugin] Try: different Invidious instance, check region restrictions, or check if video is available`);
+    console.error(`[InvidiousPlugin] Try: different Invidious instance or check if video is available`);
 
     throw new DisTubeError(
       "CANNOT_GET_STREAM_URL",
-      "No playable audio stream found. All URLs failed validation. Try a different Invidious instance or check if the video is available."
+      "No playable audio stream found. Try a different Invidious instance or check if the video is available."
     );
   }
 
