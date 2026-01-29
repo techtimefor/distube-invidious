@@ -6,7 +6,7 @@
     "type": "git",
     "url": "git+https://github.com/techtimefor/distube-invidious.git"
   },
-  "description": "Invidious extractor plugin for DisTube",
+  "description": "An unofficial Invidious extractor plugin for DisTube",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
